@@ -13,6 +13,7 @@ const allow = (text: string): Outcome => ({ decision: "allowed", reason: "ok", t
 const refuse = (reason: string, text: string): Outcome => ({ decision: "refused", reason, text });
 
 const NOT_FOUND = refuse("not_found", "No such order in your workspace.");
+const FAILED = refuse("internal_error", "The tool failed on the server.");
 
 // Data from the store goes back to the model inside a marked block, so the
 // model and the client can tell it apart from instructions. Escaping < and >
@@ -33,11 +34,14 @@ function asUntrustedData(source: string, value: unknown): string {
 export function registerTools(server: McpServer, caller: Caller, { store, audit, rateLimit }: ToolDeps): void {
   // Every tool runs through this guard: rate limit, role check for writes, the
   // tool itself, then exactly one audit line, whatever the outcome.
+  // Errors are caught here because the SDK would otherwise send error.message to
+  // the model, and it can carry hosts, paths or SQL. Operators get the cause on
+  // stderr; the model gets a generic line.
   const guard =
     <Args>(tool: string, access: "read" | "write", run: (args: Args) => Outcome) =>
     async (args: Args): Promise<CallToolResult> => {
       const started = performance.now();
-      let outcome = refuse("internal_error", "The tool failed on the server."); // kept if run() throws
+      let outcome: Outcome;
       try {
         const retryAfter = rateLimit(caller.userId);
         if (retryAfter > 0) {
@@ -50,11 +54,20 @@ export function registerTools(server: McpServer, caller: Caller, { store, audit,
         } else {
           outcome = run(args);
         }
-        return { content: [{ type: "text", text: outcome.text }], isError: outcome.decision === "refused" };
-      } finally {
+      } catch (error) {
+        console.error(`tool ${tool} failed:`, error);
+        outcome = FAILED;
+      }
+      try {
         const { decision, reason } = outcome;
         await audit({ caller, tool, args, decision, reason, durationMs: performance.now() - started });
+      } catch (error) {
+        // No audit line, no result. A write that already ran stays applied;
+        // production keeps the change and its audit record in one transaction.
+        console.error(`audit for ${tool} failed:`, error);
+        outcome = FAILED;
       }
+      return { content: [{ type: "text", text: outcome.text }], isError: outcome.decision === "refused" };
     };
 
   // Annotations are hints for the client (for example, to ask the user before a

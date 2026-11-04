@@ -4,7 +4,7 @@ A small reference [MCP](https://modelcontextprotocol.io) server that shows how t
 without handing it the keys. It serves a toy multi-tenant order list over Streamable HTTP, and every safety rule is
 enforced by the server, not left to the model.
 
-About 330 lines of TypeScript (plus tests) on Bun and the official `@modelcontextprotocol/sdk` (1.32.2). One file per concern:
+About 340 lines of TypeScript (plus tests) on Bun and the official `@modelcontextprotocol/sdk` (1.32.2). One file per concern:
 
 | File                 | Concern                                               |
 | -------------------- | ----------------------------------------------------- |
@@ -16,6 +16,8 @@ About 330 lines of TypeScript (plus tests) on Bun and the official `@modelcontex
 | `src/server.ts`      | HTTP handling: sign-in, then a per-caller MCP server  |
 | `src/main.ts`        | Wiring and `Bun.serve`                                |
 | `src/server.test.ts` | End-to-end tests with the real MCP client             |
+| `src/tools.test.ts`  | Guard failure paths: a failing tool or audit write    |
+| `src/policy.test.ts` | Write role and rate-limit window                      |
 
 ## What it shows
 
@@ -42,6 +44,7 @@ About 330 lines of TypeScript (plus tests) on Bun and the official `@modelcontex
 | Sensitive arguments leak into logs                      | Only an HMAC-SHA256 of the arguments is logged (`audit.ts`)                                                   |
 | A runaway agent loop or bulk scraping                   | Per-user rate limit with a clear refusal (`policy.ts`)                                                        |
 | Cross-site or DNS-rebinding requests from a browser     | Requests carrying an `Origin` header get `403`; binds to `127.0.0.1` by default (`server.ts`, `main.ts`)      |
+| Error messages leak hosts, paths or SQL to the model    | A failing tool or audit write returns a generic error; the cause goes to stderr (`tools.ts`)                  |
 
 ### Why mark data as untrusted
 
@@ -57,7 +60,7 @@ model still holds only the caller's own permissions: it cannot see other tenants
 ```sh
 bun install
 bun run start        # MCP endpoint: http://127.0.0.1:3000/mcp
-bun test             # end-to-end tests
+bun test             # end-to-end and unit tests
 bun run typecheck
 ```
 
@@ -131,7 +134,8 @@ Be clear about what this sample does not do:
   real boundary.
 - **The audit log has gaps.** Calls the SDK rejects before a tool handler runs (unknown tool name, arguments that fail
   schema validation) are not audited, and requests refused at sign-in are not tool calls. The log is a local file
-  with no tamper protection. It is written after the call, so if the append fails after a write, the change stays.
+  with no tamper protection. It is written after the call, so if the append fails after a write, the change stays and the caller gets a
+  generic error instead of the result.
 - **Unknown arguments are dropped silently**, not rejected. A model that invents a `tenantId` gets its own tenant's
   data and no warning.
 - **Demo-grade state.** Tokens are plaintext and never expire; data and rate-limit counters live in memory and reset on

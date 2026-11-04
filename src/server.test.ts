@@ -1,6 +1,7 @@
 // End-to-end tests: a real MCP client talks to the app over Streamable HTTP.
 // The client's fetch calls the app directly, so no port is opened.
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +34,7 @@ function setup(rateLimit = { limit: 100, windowMs: 60_000 }) {
     });
     await client.connect(transport);
     return {
+      client,
       async call(name: string, args: Record<string, unknown> = {}) {
         const raw = await client.callTool({ name, arguments: args });
         const result = CallToolResultSchema.parse(raw);
@@ -94,6 +96,56 @@ describe("sign-in", () => {
     const { app } = setup();
     const res = await app(mcpPost({ Authorization: `Bearer ${ANA}`, Origin: "https://evil.example" }));
     expect(res.status).toBe(403);
+  });
+});
+
+describe("transport and start-up", () => {
+  test("only /mcp exists, and it serves POST only", async () => {
+    const { app } = setup();
+    expect((await app(new Request("http://localhost/admin"))).status).toBe(404);
+    const get = await app(new Request(MCP_URL, { headers: { Authorization: `Bearer ${ANA}` } }));
+    expect(get.status).toBe(405);
+    expect(get.headers.get("Allow")).toBe("POST");
+  });
+
+  test("invalid users or orders fail at start-up, not on the first request", () => {
+    const base = { users, orders, auditPath: "unused.log", auditKey: "k", rateLimit: { limit: 1, windowMs: 1 } };
+    const shortToken = [{ token: "short", userId: "x", tenantId: "t", role: "viewer" }];
+    expect(() => createApp({ ...base, users: shortToken })).toThrow();
+    expect(() => createApp({ ...base, users: [{ ...users[0], role: "admin" }] })).toThrow();
+    expect(() => createApp({ ...base, orders: [{ id: "o-1" }] })).toThrow();
+  });
+});
+
+describe("tool surface", () => {
+  test("no tool takes a tenant or user id, and the hints match what each tool does", async () => {
+    const { connect } = setup();
+    const { client } = await connect(ANA);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_order", "list_orders", "update_order_status"]);
+    for (const tool of tools) {
+      const params = Object.keys(tool.inputSchema.properties ?? {});
+      expect(params).not.toContain("tenantId");
+      expect(params).not.toContain("userId");
+    }
+    const hints = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
+    expect(hints.list_orders).toMatchObject({ readOnlyHint: true });
+    expect(hints.get_order).toMatchObject({ readOnlyHint: true });
+    expect(hints.update_order_status).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+  });
+
+  test("arguments outside the schema are refused and change nothing", async () => {
+    const { connect } = setup();
+    const ben = await connect(BEN);
+    const attempts = [
+      { orderId: "o".repeat(65), status: "shipped", confirm: true },
+      { orderId: "o-1001", status: "deleted", confirm: true },
+      { orderId: "o-1001", status: "shipped", confirm: "true" },
+    ];
+    for (const args of attempts) {
+      expect((await ben.call("update_order_status", args)).isError).toBe(true);
+    }
+    expect(dataOf((await ben.call("get_order", { orderId: "o-1001" })).text)).toMatchObject({ status: "pending" });
   });
 });
 
@@ -194,6 +246,9 @@ describe("audit log", () => {
       expect(line.argsHmac).toMatch(/^[0-9a-f]{64}$/);
       expect(typeof line.durationMs).toBe("number");
     }
+    // The hash is keyed: whoever holds the key can confirm a suspected input.
+    const keyed = (args: object) => createHmac("sha256", "test-key").update(JSON.stringify(args)).digest("hex");
+    expect(lines[0]?.argsHmac).toBe(keyed({ orderId: "o-1002" }));
     const raw = await Bun.file(auditPath).text();
     expect(raw).not.toContain("o-1002");
     expect(raw).not.toContain("cancelled");
