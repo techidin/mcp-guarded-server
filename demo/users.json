@@ -1,0 +1,5 @@
+[
+  { "token": "demo-ana-viewer-token", "userId": "ana", "tenantId": "tenant-a", "role": "viewer" },
+  { "token": "demo-ben-editor-token", "userId": "ben", "tenantId": "tenant-a", "role": "editor" },
+  { "token": "demo-cho-editor-token", "userId": "cho", "tenantId": "tenant-b", "role": "editor" }
+]
